@@ -1,0 +1,13 @@
+{
+  "name": "solarthik-lender-portal-backend",
+  "version": "1.0.0",
+  "description": "Minimal JWT-scoped backend for the SolarThik lender/integrator portal. Fixes the client-side-only PORTFOLIO.filter() pattern in demos/solarthik-platform-prototype.html, where the full dataset sat in browser memory regardless of which view was selected. See portal-server.js's own header comment for what this does and does not cover.",
+  "main": "portal-server.js",
+  "scripts": {
+    "start": "node portal-server.js"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3"
+  }
+}
