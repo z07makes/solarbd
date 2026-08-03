@@ -261,9 +261,9 @@
         <h3 style="font-family:var(--font-m); font-size:12px; text-transform:uppercase; color:var(--text-dim); margin-bottom:14px;">Why the app looks like this</h3>
         <ul>
           <li><b>The source pill never says "off-grid."</b> It says grid, solar, or battery — because the system is always meant to be read against the grid connection, not instead of it.</li>
-          <li><b>Poultry's segment card is about ventilation hours protected, not taka saved.</b> That's the actual purchase decision for that customer, per Part 1's finding that bill-savings alone doesn't clear the EMI there.</li>
-          <li><b>Cold storage's card leads with peak-hour avoidance</b>, the software-driven value stream identified in the mitigation sprint — separate from, and often bigger than, the solar generation number.</li>
-          <li><b>The outage log is deliberately visible</b>, including partial-coverage events — the same transparency principle from the original calculator's "verify before customer-facing use" disclaimer, now applied to live data instead of projections.</li>
+          <li><b>Poultry's segment card is about ventilation hours protected, not taka saved.</b> That's the actual purchase decision for that customer.</li>
+          <li><b>Cold storage leads with the honest solar-only number</b> — 131% coverage from panels alone, no battery cost issue to reconcile. A battery's case here is resilience (avoided spoilage, avoided diesel-generator cost), not bill arbitrage — see the disclaimer below for why that's shown separately rather than folded into one inflated percentage.</li>
+          <li><b>The outage log is deliberately visible</b>, including partial-coverage events — transparency applied to live data, not just projections.</li>
         </ul>
       </div>
     </div>
@@ -302,14 +302,14 @@
       <div class="panel">
         <h3>Generation performance vs. payment reliability</h3>
         <div class="chart-wrap"><canvas id="riskChart"></canvas></div>
-        <div class="callout">Each dot is one financed system. The correlation is the pitch: systems generating close to projection also pay on time far more often — real data a lender can underwrite against, instead of a sales estimate.</div>
+        <div class="callout">Each dot is one financed system. The correlation is the pitch: systems generating close to projection also pay on time far more often — real data a lender can underwrite against, instead of a sales estimate. <b>Client-side demo pattern still in use here</b> — the real, tested fix (server-side JWT scoping) lives in <code>portal/portal-server.js</code> + <code>portal/lender-portal-client-fix.js</code>. Swap this section for that pair before any real customer data touches this page.</div>
       </div>
     </div>
   </section>
 
 </main>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<script src="../engine/dispatch-engine.js"></script>
 <script>
 /* ================= NAV ================= */
 document.querySelectorAll('.nav-tab').forEach(btn=>{
@@ -324,62 +324,141 @@ document.querySelectorAll('.nav-tab').forEach(btn=>{
 function fmtTk(n){ return (n<0?'\u2212':'') + 'Tk ' + Math.abs(Math.round(n)).toLocaleString('en-IN'); }
 function fmtTime(d){ return d.toTimeString().slice(0,5); }
 
-/* ================= SEGMENT PROFILES (shared by schema + customer tabs) ================= */
+/* ================= SEGMENT PROFILES + REAL ENGINE CONFIGS =================
+   REVISION (Aug 2, 2026): both poultry and cold storage EMI/savings pairings
+   below were found to be mismatched-system-size bugs -- see
+   reports/POULTRY-SIZING-FINDING.md and reports/COLD-STORAGE-FINANCING-FINDING.md
+   + reports/RESEARCH-BATTERY-COST-AND-RESIDENTIAL-SAM-CAC.md for the full audit
+   trail. Both are corrected here, in opposite directions:
+
+   POULTRY: the Tk4,487 EMI was priced for a 3.0kW solar + 5kWh battery system
+   (mitigation_calc.py's combined lever, confirmed to the dollar) but was being
+   compared against savings simulated from a much smaller 1.36kW/2.4kWh config.
+   Fixed by simulating the SAME 3.0kW/5kWh system the EMI actually pays for:
+   real result Tk7,950/mo, 177% coverage -- verified live, not assumed.
+
+   COLD STORAGE: the reverse problem, and worse. The Tk76,632 EMI is solar-only
+   (100kW, confirmed to the dollar); a 1500kWh battery was added to the SAVINGS
+   side without ever pricing that battery into the EMI. Real 2026 battery cost
+   at this scale (Tk27,000-37,000/kWh, sourced -- NOT the Tk25,000/kWh
+   small-battery placeholder, which turned out to be optimistic, not
+   conservative) makes EVERY battery size tested a net loss on pure arbitrage,
+   at every price point in that range. The honest headline is the SOLAR-ONLY
+   figure (0kWh battery, 131% coverage, no battery-cost issue to reconcile).
+   A battery's case here is resilience (avoided spoilage / avoided
+   diesel-generator cost -- Bangladesh Cold Storage Association: 30-40% opex
+   increase from diesel gensets during load-shedding, sourced, current), not
+   bill arbitrage. That resilience value is real but not quantified by this
+   platform yet -- shown as a qualitative note, not invented as a fake number. */
+
+function scaledShape(shape, dailyTotalKwh){
+  const raw = shape.reduce((a,b)=>a+b,0);
+  return shape.map(v=>v*(dailyTotalKwh/raw));
+}
+const RESIDENTIAL_LOAD_SHAPE = [.4,.3,.3,.3,.3,.4,.6,.9,.8,.6,.6,.7,.8,.8,.7,.6,.6,.8,1.3,1.8,2.0,1.7,1.2,.7];
+const POULTRY_LOAD_SHAPE_KW  = new Array(24).fill(1.35);
+const COLDSTORAGE_LOAD_SHAPE_KW = new Array(24).fill(3000*800/8760); // 273.97kW, matches the load the Tk76,632 solar-only EMI was sized against
+
+const ENGINE_CONFIG = {
+  residential: { loadShapeByHour: scaledShape(RESIDENTIAL_LOAD_SHAPE, 800/30.4), emi: 8009,
+    solarByHour: buildSolarProfile(5.5*4.3*0.8), primingDays: 2, initialSocFrac: 0,
+    engineCfg: { batteryCapacityKwh: 12, batteryMaxRateKw: 6, tariffMode: TariffMode.RESIDENTIAL_SLAB } },
+  // CORRECTED: 3.0kW solar + 5kWh battery -- the system the Tk4,487 EMI
+  // actually prices, not the smaller 1.36kW/2.4kWh config used previously.
+  poultry: { loadShapeByHour: POULTRY_LOAD_SHAPE_KW, emi: 4487,
+    solarByHour: Array.from({length:24}, (_,h) => solarShape(h, 3.0)),
+    primingDays: 1, initialSocFrac: 0.5,
+    engineCfg: { batteryCapacityKwh: 5.0, batteryMaxRateKw: 5.0*(1.6/2.4), tariffMode: TariffMode.COMMERCIAL_FLAT,
+                 resilienceChargeTargetFrac: 0.95, resilienceChargeHour: 11, resilienceChargeCutoffHour: 19 } },
+  // CORRECTED: 0kWh battery -- the honest, financially-consistent headline.
+  // The dispatch engine below is still fully TOU/battery-capable (see the
+  // config's tariffMode/chargeFromGridOffpeak) so the "hybrid switching"
+  // capability is real and demonstrable; 0kWh is what's actually financed
+  // and what actually clears the EMI on its own economics.
+  coldstorage: { loadShapeByHour: COLDSTORAGE_LOAD_SHAPE_KW, emi: 76632,
+    solarByHour: buildSolarProfile(100*4.3*0.8), primingDays: 2, initialSocFrac: 0,
+    engineCfg: { batteryCapacityKwh: 0, batteryMaxRateKw: 0, tariffMode: TariffMode.TIME_OF_USE,
+                 peakHardFloorFrac: 0.05, chargeFromGridOffpeak: true } },
+};
+
 const SEGMENTS = {
   residential:{ name:'Rahman residence', load:1.2, emi:8009, avgSavings:8835, criticalLabel:'N/A', hasCritical:false,
     segTitle:'Standard hybrid savings', segDesc:'Solar offsets your bill directly. No dedicated critical circuit on this system.',
     color:'green', outages:[{t:'3 days ago, 8:12pm',dur:'42 min',status:'protected'},{t:'11 days ago, 6:40am',dur:'18 min',status:'protected'}]},
-  poultry:{ name:'Gazipur broiler shed #4', load:1.35, emi:4487, avgSavings:4819, criticalLabel:'Ventilation protected', hasCritical:true,
-    segTitle:'Flock protection status', segDesc:'Ventilation circuit ran on battery through every outage this month — 0 birds lost to heat stress.',
+  poultry:{ name:'Gazipur broiler shed #4', load:1.35, emi:4487, avgSavings:7950, criticalLabel:'Ventilation protected', hasCritical:true,
+    segTitle:'Flock protection status', segDesc:'Sized correctly (3.0kW solar + 5kWh battery, matching what the Tk4,487 EMI actually finances): Tk7,950/mo savings, 177% coverage. Ventilation circuit ran on battery through every outage this month — 0 birds lost to heat stress.',
     color:'gold', outages:[{t:'Yesterday, 7:30pm',dur:'1h 05m',status:'protected'},{t:'6 days ago, 2:15pm',dur:'2h 40m',status:'protected'},{t:'19 days ago, 8:00pm',dur:'3h 10m',status:'partial'}]},
-  coldstorage:{ name:'Bogura cold storage — Unit B', load:274, emi:76632, avgSavings:100602, criticalLabel:'Peak-hours avoided', hasCritical:true,
-    segTitle:'Peak-shaving performance', segDesc:'Battery covered the Tk13.62 peak window on 27 of 30 days this month — Tk166,575 in avoided peak-rate charges.',
+  coldstorage:{ name:'Bogura cold storage — Unit B', load:274, emi:76632, avgSavings:100602, criticalLabel:'Diesel-cost avoidance (resilience)', hasCritical:true,
+    segTitle:'Solar-only performance — honest and fully financed', segDesc:'Tk100,602/mo from direct solar offset alone — 131% coverage, no battery cost to reconcile. A battery would add real value here, but not on bill savings: at real 2026 pricing (Tk27,000-37,000/kWh), every battery size tested loses money on pure peak-shifting once honestly financed. The real case for one is resilience — Bangladesh Cold Storage Association reports 30-40% higher opex from diesel generators during load-shedding. That value is real but not yet quantified by this platform.',
     color:'blue', outages:[{t:'4 days ago, 6:05pm',dur:'50 min',status:'protected'},{t:'14 days ago, 5:50pm',dur:'1h 20m',status:'protected'}]}
 };
+
+function computeMonthlySavings(key){
+  const cfg = ENGINE_CONFIG[key];
+  const engine = new HybridDispatchEngine(cfg.engineCfg, cfg.engineCfg.batteryCapacityKwh*cfg.initialSocFrac);
+  const stepsPerHour = 12, dt = 1/stepsPerHour;
+  for(let day=0; day<cfg.primingDays+1; day++){
+    for(let h=0; h<24; h++){
+      for(let s=0; s<stepsPerHour; s++){
+        engine.step({hour:h, solarAvailableKw:cfg.solarByHour[h], loadKw:cfg.loadShapeByHour[h], gridAvailable:true}, dt);
+      }
+    }
+    if(day<cfg.primingDays) engine.resetPeriod();
+  }
+  return engine.scaledPeriodSavings(30.4);
+}
 
 /* ================= TAB 1: LIVE DATA PIPELINE SIMULATION ================= */
 let schemaSegKey = 'residential';
 let simTimer = null, simMinutesElapsed = 0;
 let todaySolarKwh = 0, todayGridKwh = 0, todayOutageMin = 0, criticalOK = true;
+let liveEngine = null, liveSolarShape = null, cachedMonthlySavings = 0, projectedSolarSoFar = 0;
+
+function jitter(v){ return v * (0.92 + Math.random()*0.16); }
 
 function stepSimulation(){
   const seg = SEGMENTS[schemaSegKey];
+  const cfg = ENGINE_CONFIG[schemaSegKey];
   simMinutesElapsed += 5;
-  const hourOfDay = (9 + Math.floor(simMinutesElapsed/12)) % 24; // compress a day into the demo loop
-  const sunFactor = Math.max(0, Math.sin(((hourOfDay-6)/12)*Math.PI));
-  const solar = +(seg.load * 1.6 * sunFactor * (0.85+Math.random()*0.3)).toFixed(2);
-  const load = +(seg.load * (0.8+Math.random()*0.4)).toFixed(2);
-  const outageNow = Math.random() < 0.06;
-  const battery = +(30+Math.random()*65).toFixed(0);
-  const grid = outageNow ? 0 : Math.max(0, +(load-solar).toFixed(2));
-  const source = outageNow ? (battery>10?'Battery (outage)':'Unmet') : (solar>=load ? 'Solar' : (grid>0.05?'Grid + solar':'Solar'));
+  const hourOfDay = (9 + Math.floor(simMinutesElapsed/12)) % 24;
+  const dt = 5/60;
 
-  todaySolarKwh += solar*(5/60);
-  todayGridKwh += grid*(5/60);
-  if(outageNow){ todayOutageMin += 5; if(seg.hasCritical && battery<10) criticalOK=false; }
+  const solarIn = jitter(liveSolarShape[hourOfDay]);
+  const loadIn = jitter(cfg.loadShapeByHour[hourOfDay]);
+  const outageNow = Math.random() < 0.06;
+  const r = liveEngine.step({hour:hourOfDay, solarAvailableKw:solarIn, loadKw:loadIn, gridAvailable:!outageNow}, dt);
+
+  const solar = +solarIn.toFixed(2), load = +loadIn.toFixed(2);
+  const battCapForPct = cfg.engineCfg.batteryCapacityKwh || 1; // avoid /0 for the 0kWh cold-storage default
+  const battPct = Math.round((r.batterySocKwh/battCapForPct)*100);
+  const grid = +r.gridKw.toFixed(2);
+
+  todaySolarKwh += solar*dt;
+  todayGridKwh += grid*dt;
+  projectedSolarSoFar += liveSolarShape[hourOfDay]*dt;
+  if(outageNow){ todayOutageMin += 5; if(seg.hasCritical && r.unmetKw > 0.01) criticalOK = false; }
 
   const log = document.getElementById('streamLog');
   const row = document.createElement('div');
   row.className='stream-row';
   row.innerHTML = `<span>${String(9+Math.floor(simMinutesElapsed/60)).padStart(2,'0')}:${String(simMinutesElapsed%60).padStart(2,'0')}</span>`+
-    `<span class="${solar>0?'hl':''}">${solar}kW solar</span><span>${grid}kW grid</span><span>${battery}% batt</span>`;
+    `<span class="${solar>0?'hl':''}">${solar}kW solar</span><span>${grid}kW grid</span><span>${cfg.engineCfg.batteryCapacityKwh>0?battPct+'% batt':'n/a'}</span>`;
   log.prepend(row);
   while(log.children.length>10) log.removeChild(log.lastChild);
 
   document.getElementById('todaySolar').textContent = todaySolarKwh.toFixed(1)+' kWh';
   document.getElementById('todayGrid').textContent = todayGridKwh.toFixed(1)+' kWh';
   document.getElementById('todayOutage').textContent = todayOutageMin+' min';
-  document.getElementById('criticalLabel').textContent = seg.hasCritical ? 'Critical load' : 'Critical circuit';
+  document.getElementById('criticalLabel').textContent = seg.hasCritical ? seg.criticalLabel : 'Critical circuit';
   document.getElementById('criticalStatus').textContent = seg.hasCritical ? (criticalOK?'Protected':'Check needed') : 'Not applicable';
 
-  const monthSavings = seg.avgSavings * (0.9+Math.random()*0.2);
-  const coverage = monthSavings/seg.emi;
+  const coverage = cachedMonthlySavings/seg.emi;
   document.getElementById('monthCoverage').textContent = (coverage*100).toFixed(0)+'%';
   document.getElementById('monthCoverage').style.color = coverage>=1 ? 'var(--green)' : 'var(--red)';
-  document.getElementById('monthSavings').textContent = fmtTk(monthSavings);
+  document.getElementById('monthSavings').textContent = fmtTk(cachedMonthlySavings);
   document.getElementById('monthEMI').textContent = fmtTk(seg.emi);
 
-  const genPerf = 88+Math.random()*18;
+  const genPerf = projectedSolarSoFar > 0.05 ? Math.min(112, (todaySolarKwh/projectedSolarSoFar)*100) : 100;
   const payRel = 82+Math.random()*18;
   document.getElementById('genPerf').textContent = genPerf.toFixed(0)+'%';
   document.getElementById('payRel').textContent = payRel.toFixed(0)+'%';
@@ -391,7 +470,11 @@ function stepSimulation(){
 
 function resetSimulation(){
   document.getElementById('streamLog').innerHTML='';
-  simMinutesElapsed=0; todaySolarKwh=0; todayGridKwh=0; todayOutageMin=0; criticalOK=true;
+  simMinutesElapsed=0; todaySolarKwh=0; todayGridKwh=0; todayOutageMin=0; criticalOK=true; projectedSolarSoFar=0;
+  const cfg = ENGINE_CONFIG[schemaSegKey];
+  liveEngine = new HybridDispatchEngine(cfg.engineCfg, cfg.engineCfg.batteryCapacityKwh*0.3);
+  liveSolarShape = cfg.solarByHour;
+  cachedMonthlySavings = computeMonthlySavings(schemaSegKey);
   if(simTimer) clearInterval(simTimer);
   stepSimulation();
   simTimer = setInterval(stepSimulation, 1800);
@@ -406,26 +489,53 @@ document.querySelectorAll('#schemaSeg .seg-btn').forEach(btn=>{
 });
 
 /* ================= TAB 2: CUSTOMER APP ================= */
+function fmtSource(s){ return s.charAt(0).toUpperCase()+s.slice(1).replace(/\+/g,' + '); }
+
+function computeSegmentSnapshot(key){
+  const cfg = ENGINE_CONFIG[key];
+  const engine = new HybridDispatchEngine(cfg.engineCfg, cfg.engineCfg.batteryCapacityKwh*cfg.initialSocFrac);
+  const stepsPerHour = 12, dt = 1/stepsPerHour;
+  let lastDayResults = [];
+  for(let day=0; day<cfg.primingDays+1; day++){
+    if(day===cfg.primingDays) lastDayResults = [];
+    for(let h=0; h<24; h++){
+      for(let s=0; s<stepsPerHour; s++){
+        const r = engine.step({hour:h, solarAvailableKw:cfg.solarByHour[h], loadKw:cfg.loadShapeByHour[h], gridAvailable:true}, dt);
+        if(day===cfg.primingDays) lastDayResults.push(r);
+      }
+    }
+    if(day<cfg.primingDays) engine.resetPeriod();
+  }
+  return { monthlySavings: engine.scaledPeriodSavings(30.4), day3Results: lastDayResults, battCapKwh: cfg.engineCfg.batteryCapacityKwh };
+}
+
 function renderCustomerApp(key){
   const seg = SEGMENTS[key];
   document.getElementById('custName').textContent = seg.name;
-  document.getElementById('custClock').textContent = fmtTime(new Date());
-  const sourceNow = Math.random()<0.75 ? 'solar' : (Math.random()<0.5?'battery':'grid');
+  const now = new Date();
+  document.getElementById('custClock').textContent = fmtTime(now);
+
+  const snap = computeSegmentSnapshot(key);
+  const stepIdx = Math.min(now.getHours()*12 + Math.floor(now.getMinutes()/5), snap.day3Results.length-1);
+  const r = snap.day3Results[stepIdx];
+  const sourceNow = r.source.includes('battery') && !r.source.includes('grid') ? 'battery'
+                  : r.source.includes('grid') ? 'grid' : 'solar';
   const pill = document.getElementById('sourcePill');
   pill.className = 'source-pill '+sourceNow;
-  document.getElementById('sourceText').textContent = sourceNow==='solar'?'Running on solar':sourceNow==='battery'?'Running on battery (grid dip)':'Grid + solar blend';
+  document.getElementById('sourceText').textContent = fmtSource(r.source);
 
-  const monthSavings = seg.avgSavings*(0.92+Math.random()*0.16);
+  const monthSavings = snap.monthlySavings;
   const coverage = monthSavings/seg.emi;
   const covEl = document.getElementById('custCoverage');
   covEl.textContent = fmtTk(monthSavings-seg.emi);
   covEl.className = 'v ' + (coverage>=1?'pos':'neg');
   document.getElementById('custCoverageSub').textContent = `Savings ${fmtTk(monthSavings)} vs EMI ${fmtTk(seg.emi)}`;
 
-  const battPct = Math.round(35+Math.random()*60);
-  document.getElementById('custBattery').textContent = battPct+'%';
-  document.getElementById('custBatteryFill').style.width = battPct+'%';
-  document.getElementById('custTodaySavings').textContent = fmtTk(monthSavings/28);
+  const battCap = snap.battCapKwh || 1;
+  const battPct = Math.round((r.batterySocKwh/battCap)*100);
+  document.getElementById('custBattery').textContent = snap.battCapKwh>0 ? battPct+'%' : 'n/a';
+  document.getElementById('custBatteryFill').style.width = (snap.battCapKwh>0?battPct:0)+'%';
+  document.getElementById('custTodaySavings').textContent = fmtTk(snap.day3Results[snap.day3Results.length-1].savingsSoFarTk);
 
   const card = document.getElementById('custSegCard');
   card.className = 'segment-card '+key;
@@ -442,7 +552,10 @@ document.querySelectorAll('#customerSeg .seg-btn').forEach(btn=>{
   });
 });
 
-/* ================= TAB 3: LENDER / INTEGRATOR PORTAL ================= */
+/* ================= TAB 3: LENDER / INTEGRATOR PORTAL =================
+   Still the client-side demo pattern -- see the callout in the HTML above.
+   The real fix is portal/portal-server.js + portal/lender-portal-client-fix.js,
+   built, tested end-to-end (5/5 auth/scoping cases), and delivered separately. */
 const INTEGRATOR_NAME = 'Provita Agro Integrators';
 let PORTFOLIO = [];
 (function buildPortfolio(){
